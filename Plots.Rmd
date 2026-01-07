@@ -1,0 +1,562 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(scoringRules)
+library(RColorBrewer)
+library(gridExtra)
+library(scico)
+library(triptych)
+library(patchwork)
+```
+
+
+```{r}
+
+#plot's and saves all the Box plots with all the selected models in a given folder
+get_ensemble_crps <- function(station_name, test_df, start_col = 8, end_col = 57) {
+  dat <- as.matrix(test_df[test_df$stations == station_name, start_col:end_col])
+  obs <- test_df[test_df$stations == station_name, ]$obs
+  crps_sample(obs, dat = dat, method = "edf")
+}
+
+make_station_crps_df <- function(station_name, test_df, start_col = 8, end_col = 57) {
+  ensemble_crps <- tryCatch({
+    get_ensemble_crps(station_name, test_df, start_col, end_col)
+  }, error = function(e) NA_real_)
+  
+  df <- data.frame(
+    crps_values = c(
+      # Gaussian log
+      station_model_predictions_boosting[[station_name]]$model_gaussian_log$predictions$model_gaussian_log$crps,
+      station_model_predictions[[station_name]]$model_gaussian_log$predictions$model_gaussian_log$crps,
+      models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_log$crps,
+      models_boosting_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_log$crps,
+      
+      # Gaussian quadratic
+      station_model_predictions[[station_name]]$model_gaussian_quadratic$predictions$model_gaussian_quadratic$crps,
+      models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_quadratic$crps,
+      
+      # Logistic log
+      station_model_predictions_boosting[[station_name]]$model_logistic_log$predictions$model_logistic_log$crps,
+      station_model_predictions[[station_name]]$model_logistic_log$predictions$model_logistic_log$crps,
+      models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_log$crps,
+      models_boosting_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_log$crps,
+      
+      # Logistic quadratic
+      station_model_predictions[[station_name]]$model_logistic_quadratic$predictions$model_logistic_quadratic$crps,
+      models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_quadratic$crps,
+      
+      
+      ensemble_crps
+    ),
+    
+    Model = c(
+      "Full boosting model GL","Full model GL","Station specfic model GL","Station specific boosting model GL",
+      "Full model GQ","Station specfic model GQ",
+      "Full boosting model LL","Full model LL","Station specfic model LL","Station specific boosting model LL",
+      "Full model LQ","Station specfic model LQ",
+      "ENSEMBLES"
+    ),
+    
+    Group = c(
+      rep("Gaussian log", 4),
+      rep("Gaussian quadratic", 2),
+      rep("Logistic log", 4),
+      rep("Logistic quadratic", 2),
+      "Ensembles"
+    )
+  )
+  
+
+  #df <- df[!is.na(df$crps_values) & !is.na(df$Group) & df$crps_values < 1.8, ]
+  
+
+  df$Group <- factor(df$Group, levels = c(
+    "Gaussian log", "Gaussian quadratic", "Logistic log", "Logistic quadratic", "Ensembles"
+  ))
+  
+  df$Station <- station_name
+  return(df)
+}
+
+
+all_stations <- unique(test$stations)
+
+out_dir <- "station_boxplots"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+
+model_colors <- c(
+  "Full boosting model GL"       = "#1b9e77",
+  "Full model GL"                = "#d95f02",
+  "Station specfic model GL"     = "#7570b3",
+  "Station specific boosting model GL" = "#e7298a",
+  "Full model GQ"                = "#66a61e",
+  "Station specfic model GQ"     = "#e6ab02",
+  "Full boosting model LL"       = "#a6761d",
+  "Full model LL"                = "#666666",
+  "Station specfic model LL"     = "#1f78b4",
+  "Station specific boosting model LL" = "#b2df8a",
+  "Full model LQ"                = "#fb9a99",
+  "Station specfic model LQ"     = "#fdbf6f",
+  "ENSEMBLES"                    = "#cab2d6"
+)
+
+for (st in all_stations) {
+  crps_df <- make_station_crps_df(st, test, start_col = 8, end_col = 57)
+  
+  if (nrow(crps_df) == 0) {
+    cat("Skipping", st, "- no CRPS data\n")
+    next
+  }
+  
+  safe_name <- gsub("[^a-zA-Z0-9_]", "_", st)
+  plot_file <- file.path(out_dir, paste0(safe_name, "_CRPS_grouped.pdf"))
+  
+  pdf(plot_file, width = 14, height = 9, bg = "white")
+  print(
+    ggplot(crps_df, aes(x = Group, y = crps_values, fill = Model)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.8)) +
+      theme_minimal() +
+      coord_cartesian(ylim = c(0,2.5),expand = TRUE)+
+      labs(
+        title = paste("CRPS grouped comparison -", st),
+        x = "Groups",
+        y = "CRPS"
+      ) +
+      scale_fill_manual(values = model_colors)
+  )
+  dev.off()
+  
+  cat("Saved plot for station:", st, "\n")
+}
+
+
+```
+
+
+```{r}
+#The following code will make a combined plot of time series of observations and the corresponding plot is the crps smooth curve plot
+
+
+model_colors <- c(
+  "Full boosting model GL"             = "#1b9e77",
+  "Full model GL"                      = "#d95f02",
+  "Station specfic model GL"           = "#7570b3",
+  "Station specific boosting model GL" = "#e7298a",
+  "Full model GQ"                      = "#66a61e",
+  "Station specfic model GQ"           = "#e6ab02",
+  "Full boosting model LL"             = "#a6761d",
+  "Full model LL"                      = "#666666",
+  "Station specfic model LL"           = "#1f78b4",
+  "Station specific boosting model LL" = "#b2df8a",
+  "Full model LQ"                      = "#fb9a99",
+  "Station specfic model LQ"           = "#fdbf6f",
+  "ENSEMBLES"                          = "#cab2d6"
+)
+
+
+make_station_crps_time_df <- function(station_name, test_df, start_col = 8, end_col = 57) {
+  obs_station <- test_df[test_df$name == station_name, ]
+  dates <- obs_station$date
+  
+ 
+  dat <- as.matrix(obs_station[, start_col:end_col])
+  ensemble_crps <- tryCatch(crps_sample(obs_station$obs, dat = dat, method = "edf"), error = function(e) NULL)
+  
+
+  crps_values <- c(
+    station_model_predictions_boosting[[station_name]]$model_gaussian_log$predictions$model_gaussian_log$crps,
+    station_model_predictions[[station_name]]$model_gaussian_log$predictions$model_gaussian_log$crps,
+    models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_log$crps,
+    models_boosting_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_log$crps,
+    station_model_predictions[[station_name]]$model_gaussian_quadratic$predictions$model_gaussian_quadratic$crps,
+    models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_quadratic$crps,
+    station_model_predictions_boosting[[station_name]]$model_logistic_log$predictions$model_logistic_log$crps,
+    station_model_predictions[[station_name]]$model_logistic_log$predictions$model_logistic_log$crps,
+    models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_log$crps,
+    models_boosting_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_log$crps,
+    station_model_predictions[[station_name]]$model_logistic_quadratic$predictions$model_logistic_quadratic$crps,
+    models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_quadratic$crps,
+    ensemble_crps
+  )
+  
+
+  Model <- c(
+    "Full boosting model GL","Full model GL","Station specfic model GL","Station specific boosting model GL",
+    "Full model GQ","Station specfic model GQ",
+    "Full boosting model LL","Full model LL","Station specfic model LL","Station specific boosting model LL",
+    "Full model LQ","Station specfic model LQ",
+    "ENSEMBLES"
+  )
+  
+  df <- data.frame(
+    Date = rep(dates, length(Model)),
+    CRPS = crps_values,
+    Model = rep(Model, each = nrow(obs_station))
+  )
+  
+  df$Station <- station_name
+  return(df)
+}
+
+
+all_stations <- unique(test$name)
+out_dir <- "station_obs_vs_crps"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+for (st in all_stations) {
+
+  obs_station <- test[test$name == st, ]
+  p1 <- ggplot(obs_station, aes(x = date, y = obs)) +
+    geom_line(color = "black") +
+    theme_minimal() +
+    labs(title = paste("Actual Observations -", st), x = "Date", y = "Observed Value")
+  
+
+  crps_df <- make_station_crps_time_df(st, test, start_col = 8, end_col = 57)
+  
+  p2 <- ggplot(crps_df, aes(x = Date, y = CRPS, color = Model, group = Model)) +
+    geom_smooth(se = FALSE, size = 1.2) +
+    theme_minimal() +
+    labs(title = paste("CRPS Smooth Curves -", st), x = "Date", y = "CRPS") +
+    scale_color_manual(values = model_colors)
+  
+
+  combined_plot <- grid.arrange(p1, p2, ncol = 2)
+  
+
+  safe_name <- gsub("[^a-zA-Z0-9_]", "_", st)
+  plot_file <- file.path(out_dir, paste0(safe_name, "_obs_vs_crps.pdf"))
+  ggsave(plot_file, combined_plot, width = 16, height = 8, device = "pdf")
+  
+  cat("Saved side-by-side plot for station:", st, "\n")
+}
+
+```
+
+
+```{r}
+
+get_ensemble_crps <- function(station_name, test_df, start_col = 8, end_col = 57) {
+  dat <- as.matrix(test_df[test_df$stations == station_name, start_col:end_col])
+  obs <- test_df[test_df$stations == station_name, ]$obs
+  crps_sample(obs, dat = dat, method = "edf")
+}
+
+
+summarize_station_crps_safe <- function(station_name, test_df, start_col = 8, end_col = 57) {
+  
+
+  crps_list <- list(
+    "Full boosting model GL"        = station_model_predictions_boosting[[station_name]]$model_gaussian_log$predictions$model_gaussian_log$crps,
+    "Full model GL"                 = station_model_predictions[[station_name]]$model_gaussian_log$predictions$model_gaussian_log$crps,
+    "Station specific model GL"     = models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_log$crps,
+    "Station specific boosting GL"  = models_boosting_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_log$crps,
+    
+    "Full model GQ"                 = station_model_predictions[[station_name]]$model_gaussian_quadratic$predictions$model_gaussian_quadratic$crps,
+    "Station specific model GQ"     = models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_gaussian_quadratic$crps,
+    
+    "Full boosting model LL"        = station_model_predictions_boosting[[station_name]]$model_logistic_log$predictions$model_logistic_log$crps,
+    "Full model LL"                 = station_model_predictions[[station_name]]$model_logistic_log$predictions$model_logistic_log$crps,
+    "Station specific model LL"     = models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_log$crps,
+    "Station specific boosting LL"  = models_boosting_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_log$crps,
+    
+    "Full model LQ"                 = station_model_predictions[[station_name]]$model_logistic_quadratic$predictions$model_logistic_quadratic$crps,
+    "Station specific model LQ"     = models_stations_predictions[[paste0("station_", station_name)]]$predictions$model_logistic_quadratic$crps
+  )
+  
+
+  ensemble_crps <- tryCatch(
+    get_ensemble_crps(station_name, test_df, start_col, end_col),
+    error = function(e) NA_real_
+  )
+  crps_list[["Ensembles"]] <- ensemble_crps
+  
+
+  summary_df <- do.call(rbind, lapply(names(crps_list), function(model_name) {
+    vals <- crps_list[[model_name]]
+    
+    if(length(vals) == 0 || all(is.na(vals))) return(NULL)
+    
+    qs <- quantile(vals, probs = c(0.25, 0.75), na.rm = TRUE)
+    data.frame(
+      Model  = model_name,
+      Mean   = mean(vals, na.rm = TRUE),
+      Median = median(vals, na.rm = TRUE),
+      SD     = sd(vals, na.rm = TRUE),
+      Min    = min(vals, na.rm = TRUE),
+      Q1     = qs[1],
+      Q3     = qs[2],
+      Max    = max(vals, na.rm = TRUE)
+    )
+  }))
+  
+  return(summary_df)
+}
+
+```
+
+
+
+```{r}
+#heatmap for mean of the CRPS for selected models
+
+plot_crps_heatmap <- function(selected_stations, summarize_fn, test_df) {
+  
+  mean_crps_df <- data.frame()
+  for (st in selected_stations) {
+    summary_df <- summarize_fn(station_name = st, test_df = test_df)
+    summary_df <- summary_df %>% select(Model, Mean)
+    summary_df$Station <- st
+    mean_crps_df <- rbind(mean_crps_df, summary_df)
+  }
+  ggplot(mean_crps_df, aes(x = Model, y = Station, fill = Mean)) +
+  geom_tile(color = "white") +
+    geom_text(aes(label = round(Mean, 2)), color = "black", size = 3) +
+  scale_fill_scico(palette = "batlow") +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Mean CRPS Heatmap", x = "Model", y = "Station", fill = "Mean CRPS")
+
+}
+
+selected_stations <- c("Andernach", "Kall-Sistig","Köln-Bonn")
+mean_3stations = plot_crps_heatmap(selected_stations, summarize_station_crps_safe, test_df = test)
+ggsave(
+  filename = "heatmap_mean_3stations.pdf",
+  plot = mean_3stations,
+  width = 12,  
+  height = 8,   
+  units = "in"
+)
+
+```
+
+```{r}
+selected_stations <- c("Nürnberg", "Weißenburg-Emetzheim" ,"Memmingen","Günzburg","Bamberg","Zwiesel" ,"Gelbelsee","Mühldorf","Straubing","München-Flughafen","Kissingen,","Harburg" )
+mean_bavaria = plot_crps_heatmap(selected_stations, summarize_station_crps_safe, test_df = test)
+ggsave(
+  filename = "heatmap_mean_bavaria.pdf",
+  plot = mean_bavaria,
+  width = 12,  
+  height = 8,  
+  units = "in"
+)
+```
+
+
+```{r}
+selected_stations <- c("Barth", "Fehmarn","Kiel-Holtenau","Elpersbüttel","Sankt-peter-ording")
+mean_coastal_stations = plot_crps_heatmap(selected_stations, summarize_station_crps_safe, test_df = test)
+ggsave(
+  filename = "heatmap_coastal_stations_mean.pdf",
+  plot = mean_coastal_stations,
+  width = 12,  
+  height = 8,  
+  units = "in"
+)
+```
+
+
+```{r}
+plot_crps_q3_heatmap <- function(selected_stations, summarize_fn, test_df) {
+  
+  q3_crps_df <- data.frame()
+  for (st in selected_stations) {
+    summary_df <- summarize_fn(station_name = st, test_df = test_df)
+    summary_df <- summary_df %>% select(Model, Q3)
+    summary_df$Station <- st
+    q3_crps_df <- rbind(q3_crps_df, summary_df)
+  } 
+  ggplot(q3_crps_df, aes(x = Model, y = Station, fill = Q3)) +
+  geom_tile(color = "white") +
+    geom_text(aes(label = round(Q3, 2)), color = "black", size = 3) +
+  scale_fill_scico(palette = "batlow") +  
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Q3 CRPS Heatmap", x = "Model", y = "Station", fill = "Q3 CRPS")
+
+}
+
+selected_stations <- c("Andernach", "Kall-Sistig","Köln-Bonn")
+q3_3stations = plot_crps_q3_heatmap(selected_stations, summarize_station_crps_safe, test_df = test)
+ggsave(
+  filename = "heatmap_q3_3stations.pdf",
+  plot = q3_3stations,
+  width = 12,  
+  height = 8,   
+  units = "in"
+)
+
+```
+
+```{r}
+selected_stations <- c("Nürnberg", "Weißenburg-Emetzheim" ,"Memmingen","Günzburg","Bamberg","Zwiesel" ,"Gelbelsee","Mühldorf","Straubing","München-Flughafen","Kissingen,","Harburg" )
+q3_bavaria = plot_crps_q3_heatmap(selected_stations, summarize_station_crps_safe, test_df = test)
+ggsave(
+  filename = "heatmap_q3_bavaria.pdf",
+  plot = q3_bavaria,
+  width = 12,  
+  height = 8,  
+  units = "in"
+)
+```
+
+
+```{r}
+selected_stations <- c("Barth", "Fehmarn","Kiel-Holtenau","Elpersbüttel","Sankt-peter-ording")
+q3_coastal_stations = plot_crps_q3_heatmap(selected_stations, summarize_station_crps_safe, test_df = test)
+ggsave(
+  filename = "heatmap_coastal_stations_q3.pdf",
+  plot = q3_coastal_stations,
+  width = 12,  
+  height = 8,  
+  units = "in"
+)
+```
+
+
+```{r}
+#PIT grid plot of all the selected models for given stations
+
+selected_stations <- c("Barth", "Fehmarn","Kiel-Holtenau","Elpersbüttel","Sankt-peter-ording")
+model_titles <- c("Full Logistic Log", "Full Logistic Quadratic", 
+                  "Station Logistic Log", "Station Logistic Quadratic")
+
+station_plots <- list()
+
+for (station_name in selected_stations) {
+  
+  
+  p1 <- pithist(models$model_logistic_log, newdata = test[test$name == station_name, ], freq = TRUE)
+  p2 <- pithist(models$model_logistic_quadratic, newdata = test[test$name == station_name, ], freq = TRUE)
+  p3 <- pithist(models_stations[[paste0("station_", station_name)]]$model_logistic_log, 
+                newdata = test[test$name == station_name, ], freq = TRUE)
+  p4 <- pithist(models_stations[[paste0("station_", station_name)]]$model_logistic_quadratic, 
+                newdata = test[test$name == station_name, ], freq = TRUE)
+  
+
+  p1_plot <- autoplot(p1) + theme_minimal(base_size = 10) + labs(title = model_titles[1])
+  p2_plot <- autoplot(p2) + theme_minimal(base_size = 10) + labs(title = model_titles[2])
+  p3_plot <- autoplot(p3) + theme_minimal(base_size = 10) + labs(title = model_titles[3])
+  p4_plot <- autoplot(p4) + theme_minimal(base_size = 10) + labs(title = model_titles[4])
+  
+
+  row_plot <- p1_plot + p2_plot + p3_plot + p4_plot +
+    plot_layout(ncol = 4, guides = "collect") & theme(legend.position = "bottom")
+  title_plot <- ggplot(data = data.frame(station = station_name)) + 
+    geom_text(aes(x = 0, y = 0, label = station), size = 6) +
+    theme_void()
+  station_full <- title_plot / row_plot
+  station_plots[[station_name]] <- station_full
+}
+
+
+final_plot <- wrap_plots(station_plots, ncol = 1)
+print(final_plot)
+
+ggsave("all_selected_stations_pit_with_model_names1.pdf", final_plot, width = 16, height = length(selected_stations)*3)
+
+```
+
+
+```{r}
+
+#Reliability plots of 2 thresholds of selected models for the given stations
+
+selected_stations <- c("Barth", "Fehmarn","Kiel-Holtenau","Elpersbüttel","Sankt-peter-ording")
+output_dir <- "station_reliability_plots"
+
+if (!dir.exists(output_dir)) dir.create(output_dir)
+
+for (station_name in selected_stations) {
+  
+  #Threshold 5 plot
+  obs_data <- test[test$stations == station_name, ]$obs
+  binary_obs_0 <- ifelse(obs_data > 1, 1, 0)
+  
+  gl_0 <- data.frame(
+    y = binary_obs_0,
+    full_logistic_log = station_model_predictions[[station_name]]$model_logistic_log$predictions$model_logistic_log$predicted_probabilities,
+    full_logistic_quadratic = station_model_predictions[[station_name]]$model_logistic_quadratic$predictions$model_logistic_quadratic$predicted_probabilities,
+    station_specific_logistic_log = models_stations_predictions[[paste0("station_", station_name)]]$predicted_probabilities$model_logistic_log,
+    station_specific_logistic_quadratic = models_stations_predictions[[paste0("station_", station_name)]]$predicted_probabilities$model_logistic_quadratic
+  )
+  
+  rel_0 <- reliability(gl_0)
+  df_est_0 <- estimates(rel_0[c(1, 2, 3, 4)])
+  df_est_0$forecast <- as.factor(df_est_0$forecast)
+  
+  rel_plot_0 <- ggplot(df_est_0, aes(x = x, y = CEP, color = forecast, group = forecast)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+    geom_path(size = 1.1) +
+    labs(x = "Forecast Probability", y = "Observed Relative Frequency", color = "Forecast",
+         title = paste0(station_name, " (Threshold 1)")) +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "none")  
+  
+  #Threshold 20 plot
+  binary_obs_10 <- ifelse(obs_data > 10, 1, 0)
+  
+  gl_10 <- data.frame(
+    y = binary_obs_10,
+    full_logistic_log = station_model_predictions_b3[[station_name]]$model_logistic_log$predictions$model_logistic_log$predicted_probabilities,
+    full_logistic_quadratic = station_model_predictions_b3[[station_name]]$model_logistic_quadratic$predictions$model_logistic_quadratic$predicted_probabilities,
+    station_specific_logistic_log = models_stations_predictions_b3[[paste0("station_", station_name)]]$predicted_probabilities$model_logistic_log,
+    station_specific_logistic_quadratic = models_stations_predictions_b3[[paste0("station_", station_name)]]$predicted_probabilities$model_logistic_quadratic
+  )
+  
+  rel_10 <- reliability(gl_10)
+  df_est_10 <- estimates(rel_10[c(1, 2, 3, 4)])
+  df_est_10$forecast <- as.factor(df_est_10$forecast)
+  
+  rel_plot_10 <- ggplot(df_est_10, aes(x = x, y = CEP, color = forecast, group = forecast)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+    geom_path(size = 1.1) +
+    labs(x = "Forecast Probability", y = "Observed Relative Frequency", color = "Forecast",
+         title = paste0(station_name, " (Threshold 10)")) +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "bottom") 
+  
+ 
+  final_plot <- rel_plot_10 + rel_plot_0 + plot_layout(ncol = 2, guides = "collect") & theme(legend.position = "bottom")
+  
+  
+  ggsave(
+    filename = paste0(output_dir, "/", station_name, "_reliability.pdf"),
+    plot = final_plot,
+    width = 12,
+    height = 6
+  )
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

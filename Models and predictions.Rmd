@@ -1,0 +1,650 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+```{r}
+library(scoringRules)
+library(tidyr)
+library(dplyr)
+library(crch)
+library(DescTools)
+library(scoringRules)
+```
+
+
+
+```{r}
+data = precip_ext_2016_2020
+data <- data %>%
+  mutate(name = ifelse(name == "Sankt", "Sankt-peter-ording", name))
+data = drop_na(data)
+
+wnsp_mean =rowSums(data[61:110])/50
+wnsp_sd = apply(data[61:110],1,sd)
+
+u_mean = rowSums(data[111:160])/50
+u_sd = apply(data[111:160],1,sd)
+
+v_mean = rowSums(data[161:210])/50
+v_sd = apply(data[161:210],1,sd)
+
+wgust_mean = rowSums(data[211:260])/50
+wgust_sd = apply(data[211:260],1,sd)
+
+temp_mean = rowSums(data[261:310])/50
+temp_sd = apply(data[261:310],1,sd)
+
+pres_mean = rowSums(data[311:360])/50
+pres_sd = apply(data[311:360],1,sd)
+
+sh_mean = rowSums(data[361:410])/50
+sh_sd = apply(data[361:410],1,sd)
+
+tcc_mean = rowSums(data[411:460])/50
+tcc_sd = apply(data[411:460],1,sd)
+
+
+data$dates = as.Date(data$date)
+data$month = as.numeric(format(data$dates,"%m"))
+data$day = as.numeric(format(data$dates,"%j"))
+data$week = as.factor(weekdays(data$dates))
+
+data$sin = sin(2*pi*data$day/365)
+data$cos = cos(2*pi*data$day/365)
+
+data$stations = as.factor(data$name)
+data$sin2 = sin(2 * pi * 2 * data$day / 365)
+data$cos2 = cos(2 * pi * 2 * data$day / 365)
+data$sin4 = sin(4*pi*2*data$day/365)
+data$cos4 = cos(4*pi*2*data$day/365)
+data$wnsp_mean = wnsp_mean
+data$wnsp_sd = wnsp_sd
+data$u_mean = u_mean
+data$u_sd = u_sd
+data$v_mean = v_mean
+data$v_sd = v_sd
+data$wgust_mean = wgust_mean
+data$wgust_sd = wgust_sd
+data$temp_mean = temp_mean
+data$temp_sd = temp_sd
+
+data$pres_mean = pres_mean
+data$pres_sd = pres_sd
+data$sh_mean = sh_mean
+data$sh_sd = sh_sd
+data$tcc_mean = tcc_mean
+data$tcc_sd = tcc_sd
+
+data <- data %>% rename(mean = forc.tp.mean,
+                        sd   = forc.tp.sd)
+
+
+
+
+cut_value <- "2019-12-31"
+cut_index <- which(data$date == cut_value)
+#all_test = all_data[(cut_index+1):nrow(all_data), ]
+
+
+test <- data %>%
+  group_by(stations) %>%
+  filter(row_number() > max(which(date == cut_value))) %>%
+  ungroup()
+train <- anti_join(data, test)
+
+```
+
+
+```{r}
+#function for fitting the global general EMOS models
+all_models = function(formula,train){
+  all_models = list()
+  for (i in c("gaussian","logistic","student")){
+    for (j in c("log","quadratic","identity")){
+      model_name = paste0("model_", i, "_", j)
+      print("model is processing")
+      model = tryCatch({crch(formula,data = train,dist = i,link.scale = j,left = 0)},error = function(e) {
+        cat("Cannot fit the model", model_name, ":", conditionMessage(e), "\n")
+        return(NULL)
+      })
+       
+       if (!is.null(model)) {
+        all_models[[model_name]] <- model
+       }
+    }
+  }
+  return(all_models)
+}
+
+```
+
+```{r}
+#function for fitting the global Boosted EMOS models
+all_models_boosting = function(formula,train){
+  models_list = list()
+  for (i in c("gaussian","logistic","student")){
+    for (j in c("log","quadratic","identity")){
+      model_name = paste0("model_", i, "_", j)
+      print("model is processing")
+      model = tryCatch({crch(formula,data = train,dist = i,link.scale = j,left = 0,method = "boosting")},error = function(e) {
+        cat("Cannot fit the model", model_name, ":", conditionMessage(e), "\n")
+        return(NULL)
+      })
+       
+       if (!is.null(model)) {
+        models_list[[model_name]] <- model
+       }
+    }
+  }
+  return(models_list)
+}
+```
+
+```{r}
+#function for the metrics of models tested for new data
+predictions <- function(models, test, threshold = 0) {
+  results <- list()
+  
+  n_models <- length(models)
+  mean_stat <- numeric(n_models); names(mean_stat) <- names(models)
+  sd_stat   <- numeric(n_models); names(sd_stat)   <- names(models)
+  crps_scores <- numeric(n_models); names(crps_scores) <- names(models)
+  mse_scores  <- numeric(n_models); names(mse_scores)  <- names(models)
+  mae_scores  <- numeric(n_models); names(mae_scores)  <- names(models)
+  aic_scores  <- numeric(n_models); names(aic_scores)  <- names(models)
+  bic_scores  <- numeric(n_models); names(bic_scores)  <- names(models)
+  brier_scores <- numeric(n_models); names(brier_scores) <- names(models)
+  brier_distributions <- list()
+  predicted_probs_list <- list()
+  
+  for (i in names(models)) {
+    model <- models[[i]]
+    
+    mean_pred <- tryCatch(predict(model, newdata = test, type = "response"), error = function(e) rep(NA, nrow(test)))
+    sd_pred   <- tryCatch(predict(model, newdata = test, type = "scale"), error = function(e) rep(NA, nrow(test)))
+    
+    dist_parts <- strsplit(i, "_")[[1]]
+    dist <- if (length(dist_parts) >= 2) dist_parts[2] else dist_parts[length(dist_parts)]
+    
+    link_type <- ifelse(grepl("log", dist), "log", "identity")
+    threshold_link <- threshold
+    
+    if (grepl("gaussian", dist)) {
+      crps_vals <- tryCatch(crps_norm(test$obs, mean_pred, sd_pred), error = function(e) rep(NA, nrow(test)))
+      predicted_prob <- 1 - pnorm(threshold_link, mean = mean_pred, sd = sd_pred)
+    } else if (grepl("logistic", dist)) {
+      crps_vals <- tryCatch(crps_logis(test$obs, mean_pred, sd_pred), error = function(e) rep(NA, nrow(test)))
+      predicted_prob <- 1 - plogis(threshold_link, location = mean_pred, scale = sd_pred)
+    } else if (grepl("student", dist)) {
+      df_val <- tryCatch(model$df, error = function(e) NA)
+      if (is.na(df_val)) df_val <- tryCatch(attr(model, "df"), error = function(e) 4)
+      crps_vals <- tryCatch(crps_t(test$obs, mean_pred, sd_pred, df = df_val), error = function(e) rep(NA, nrow(test)))
+      predicted_prob <- 1 - pt((threshold_link - mean_pred) / sd_pred, df = df_val)
+    } else {
+      crps_vals <- rep(NA, nrow(test))
+      predicted_prob <- rep(NA, nrow(test))
+    }
+    
+    binary_obs <- as.numeric(test$obs > threshold)
+    brier_dist <- (predicted_prob - binary_obs)^2
+    brier_score_manual <- mean(brier_dist, na.rm = TRUE)
+    
+    mse_vals <- tryCatch(mean((test$obs - mean_pred)^2, na.rm = TRUE), error = function(e) NA)
+    mae_vals <- tryCatch(mean(abs(test$obs - mean_pred), na.rm = TRUE), error = function(e) NA)
+    aic_vals <- tryCatch(AIC(model), error = function(e) NA)
+    bic_vals <- tryCatch(BIC(model), error = function(e) NA)
+    
+    results[[i]] <- list(
+      mean = mean_pred,
+      sd = sd_pred,
+      crps = crps_vals,
+      brier_score = brier_score_manual,
+      brier_distribution = brier_dist,
+      predicted_probabilities = predicted_prob
+    )
+    
+    mean_stat[i] <- mean(mean_pred, na.rm = TRUE)
+    sd_stat[i]   <- mean(sd_pred, na.rm = TRUE)
+    crps_scores[i] <- if (all(is.na(crps_vals))) NA else mean(crps_vals, na.rm = TRUE)
+    mse_scores[i]  <- mse_vals
+    mae_scores[i]  <- mae_vals
+    aic_scores[i]  <- aic_vals
+    bic_scores[i]  <- bic_vals
+    brier_scores[i] <- brier_score_manual
+    brier_distributions[[i]] <- brier_dist
+    predicted_probs_list[[i]] <- predicted_prob
+  }
+  
+  return(list(
+    predictions = results,
+    predicted_probabilities = predicted_probs_list,
+    mean_statistic = mean_stat,
+    sd_statistic = sd_stat,
+    crps = crps_scores,
+    mse = mse_scores,
+    mae = mae_scores,
+    aic = aic_scores,
+    bic = bic_scores,
+    brier_score = brier_scores,
+    brier_distribution = brier_distributions
+  ))
+}
+
+```
+
+
+```{r}
+#fitting the global models
+models = all_models(formula = obs~mean|sd,train)
+```
+
+```{r}
+#fitting the boosted global(trained on all the stations) models
+models_boosting = all_models_boosting(formula = obs~mean+tcc_mean+sh_mean+wgust_mean+wnsp_mean+temp_mean+pres_mean+day+elevation+sin2+cos2+sin+cos+sin4+cos4|sd+tcc_sd+sh_sd+temp_sd+pres_sd+wnsp_sd+wgust_sd,train)
+```
+
+```{r}
+#fitting the local(trained on specific station) models
+models_stations = list()
+for (i in unique(train$stations)){
+  data_for_stations = train[train$stations == i,]
+  models_for_stations = all_models(formula = obs~mean|sd,train = data_for_stations)
+  models_stations[[paste0("station_",i)]] = models_for_stations
+}
+```
+
+```{r}
+#fitting the local(trained on specific station) boosting models
+models_boosting_stations = list()
+for (i in unique(train$stations)){
+ 
+  data_for_stations_boosting = train[train$stations == i,]
+  
+  models_for_boosting_stations = all_models_boosting(
+    formula = obs~mean+tcc_mean+sh_mean+wgust_mean+wnsp_mean+temp_mean+pres_mean+day+sin2+cos2+sin4+cos4|sd+tcc_sd+sh_sd+temp_sd+pres_sd+wnsp_sd+wgust_sd,
+    
+    train = data_for_stations_boosting
+                               )
+  
+  models_boosting_stations[[paste0("station_",i)]] = models_for_boosting_stations
+}
+```
+
+
+```{r}
+#prediction on new test data for global models for 4 different threshold for brier scores
+model_names <- c(
+  "model_gaussian_log",
+  "model_gaussian_quadratic",
+  "model_logistic_log",
+  "model_logistic_quadratic"
+)
+
+station_model_predictions <- list()
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results <- list()
+
+  for (model_name in model_names) {
+    
+    model_to_test <- models[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 1
+      )
+      
+  
+      station_results[[model_name]] <- preds
+    }
+  }
+  
+  station_model_predictions[[station_name]] <- station_results
+}
+
+
+
+
+
+
+station_model_predictions_b2 <- list()
+
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  if (nrow(test_station) == 0) {
+    cat("Station:", station_name, "- skipped (0 observations)\n")
+    next
+  }
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results_b2 <- list()
+  
+  for (model_name in model_names) {
+    model_to_test <- models[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 5
+      )
+      station_results_b2[[model_name]] <- preds
+    } else {
+      cat("  Model missing:", model_name, "\n")
+    }
+  }
+  
+  station_model_predictions_b2[[station_name]] <- station_results_b2
+}
+
+
+
+station_model_predictions_b3 <- list()
+
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  if (nrow(test_station) == 0) {
+    cat("Station:", station_name, "- skipped (0 observations)\n")
+    next
+  }
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results_b3 <- list()
+  
+  for (model_name in model_names) {
+    model_to_test <- models[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 10
+      )
+      station_results_b3[[model_name]] <- preds
+    } else {
+      cat("  Model missing:", model_name, "\n")
+    }
+  }
+  
+  station_model_predictions_b3[[station_name]] <- station_results_b3
+}
+
+station_model_predictions_b4 <- list()
+
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  if (nrow(test_station) == 0) {
+    cat("Station:", station_name, "- skipped (0 observations)\n")
+    next
+  }
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results_b4 <- list()
+  
+  for (model_name in model_names) {
+    model_to_test <- models[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 20
+      )
+      station_results_b4[[model_name]] <- preds
+    } else {
+      cat("  Model missing:", model_name, "\n")
+    }
+  }
+  
+  station_model_predictions_b4[[station_name]] <- station_results_b4
+}
+
+```
+
+```{r}
+#prediction on new test data for global boosting models for 4 different threshold for brier scores
+station_model_predictions_boosting <- list()
+
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results_boosting <- list()
+  
+  for (model_name in model_names) {
+    
+    model_to_test <- models_boosting[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 1
+      )
+      
+      station_results_boosting[[model_name]] <- preds
+    }
+  }
+  
+  station_model_predictions_boosting[[station_name]] <- station_results_boosting
+}
+
+
+station_model_predictions_boosting_b2 <- list()
+
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results_boosting_b2 <- list()
+  
+  for (model_name in model_names) {
+    
+    model_to_test <- models_boosting[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 5
+      )
+      
+      station_results_boosting_b2[[model_name]] <- preds
+    }
+  }
+  
+  station_model_predictions_boosting_b2[[station_name]] <- station_results_boosting_b2
+}
+
+
+station_model_predictions_boosting_b3 <- list()
+
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results_boosting_b3 <- list()
+  
+  for (model_name in model_names) {
+    
+    model_to_test <- models_boosting[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 10
+      )
+      
+      station_results_boosting_b3[[model_name]] <- preds
+    }
+  }
+  
+  station_model_predictions_boosting_b3[[station_name]] <- station_results_boosting_b3
+}
+
+
+station_model_predictions_boosting_b4 <- list()
+
+for (station_name in unique(test$stations)) {
+  
+  test_station <- test[test$stations == station_name, ]
+  
+  cat("Station:", station_name, "- Observations:", nrow(test_station), "\n")
+  
+  station_results_boosting_b4 <- list()
+  
+  for (model_name in model_names) {
+    
+    model_to_test <- models_boosting[[model_name]]
+    
+    if (!is.null(model_to_test)) {
+      preds <- predictions(
+        models = setNames(list(model_to_test), model_name),
+        test = test_station,
+        threshold = 20
+      )
+      
+      station_results_boosting_b4[[model_name]] <- preds
+    }
+  }
+  
+  station_model_predictions_boosting_b4[[station_name]] <- station_results_boosting_b4
+}
+
+```
+
+```{r}
+#prediction on new test data for station specific models for 4 different threshold for brier scores
+models_stations_predictions = list()
+for (i in unique(test$stations)){
+  data = test[test$stations == i,]
+  model_stations_list = models_stations[[paste0("station_",i)]]
+  if(!is.null(model_stations_list)){
+    preds_stations = predictions(model_stations_list,data,threshold = 1)
+    models_stations_predictions[[paste0("station_",i)]] = preds_stations
+  }
+}
+
+models_stations_predictions_b2 = list()
+for (i in unique(test$stations)) {
+  data = test[test$stations == i, ]
+  model_stations_list_b2 = models_stations[[paste0("station_", i)]]
+  if (!is.null(model_stations_list_b2)) {
+    preds_stations_b2 = predictions(model_stations_list_b2, test = data, threshold = 5)
+    models_stations_predictions_b2[[paste0("station_", i)]] = preds_stations_b2
+  }
+}
+
+
+models_stations_predictions_b3 = list()
+for (i in unique(test$stations)) {
+  data = test[test$stations == i, ]
+  model_stations_list_b3 = models_stations[[paste0("station_", i)]]
+  if (!is.null(model_stations_list_b3)) {
+    preds_stations_b3 = predictions(model_stations_list_b3, test = data, threshold = 10)
+    models_stations_predictions_b3[[paste0("station_", i)]] = preds_stations_b3
+  }
+}
+
+models_stations_predictions_b4 = list()
+for (i in unique(test$stations)) {
+  data = test[test$stations == i, ]
+  model_stations_list_b4 = models_stations[[paste0("station_", i)]]
+  if (!is.null(model_stations_list_b4)) {
+    preds_stations_b4 = predictions(model_stations_list_b4, test = data, threshold = 20)
+    models_stations_predictions_b4[[paste0("station_", i)]] = preds_stations_b4
+  }
+}
+
+```
+
+```{r}
+#prediction on new test data for station specific boosting models for 4 different threshold for brier scores
+models_boosting_stations_predictions = list()
+for (i in unique(test$stations)){
+  data = test[test$stations == i,]
+  models_boosting_list = models_boosting_stations[[paste0("station_",i)]]
+  if(!is.null(models_boosting_list)){
+    preds_boosting = predictions(models_boosting_list,data,threshold = 1)
+    models_boosting_stations_predictions[[paste0("station_",i)]] = preds_boosting
+  }
+}
+
+
+
+models_boosting_stations_predictions_b2 = list()
+for (i in unique(test$stations)) {
+  data = test[test$stations == i, ]
+  models_boosting_list_b2 = models_boosting_stations[[paste0("station_", i)]]
+  if (!is.null(models_boosting_list_b2)) {
+    preds_boosting_b2 = predictions(models_boosting_list_b2, data, threshold = 5)
+    models_boosting_stations_predictions_b2[[paste0("station_", i)]] = preds_boosting_b2
+  }
+}
+
+
+models_boosting_stations_predictions_b3 = list()
+for (i in unique(test$stations)) {
+  data = test[test$stations == i, ]
+  models_boosting_list_b3 = models_boosting_stations[[paste0("station_", i)]]
+  if (!is.null(models_boosting_list_b3)) {
+    preds_boosting_b3 = predictions(models_boosting_list_b3, data, threshold = 10)
+    models_boosting_stations_predictions_b3[[paste0("station_", i)]] = preds_boosting_b3
+  }
+}
+
+
+models_boosting_stations_predictions_b4 = list()
+for (i in unique(test$stations)) {
+  data = test[test$stations == i, ]
+  models_boosting_list_b4 = models_boosting_stations[[paste0("station_", i)]]
+  if (!is.null(models_boosting_list_b4)) {
+    preds_boosting_b4 = predictions(models_boosting_list_b4, data, threshold = 20)
+    models_boosting_stations_predictions_b4[[paste0("station_", i)]] = preds_boosting_b4
+  }
+}
+
+```
+
+
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
